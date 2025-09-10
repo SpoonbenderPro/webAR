@@ -18,7 +18,7 @@
     html,body { margin:0; height:100%; background:#000; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }
     #container { width:100vw; height:100vh; position:relative; overflow:hidden; }
 
-    /* Camera preview before AR starts */
+    /* Camera preview background */
     #cameraPreview {
       position:fixed;
       top:0; left:0;
@@ -41,7 +41,7 @@
   <div id="hint">Point your camera at the target image</div>
   <div id="container"></div>
 
-  <!-- Camera preview before AR -->
+  <!-- Live camera preview -->
   <video id="cameraPreview" autoplay playsinline muted></video>
 
   <!-- Hidden video mapped to plane -->
@@ -63,7 +63,7 @@
     const muteBtn   = document.querySelector('#muteBtn');
     const preview   = document.querySelector('#cameraPreview');
 
-    // Show live camera preview immediately
+    // Start live preview right away
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
       .then(stream => { preview.srcObject = stream; })
       .catch(err => console.error("Camera error:", err));
@@ -96,18 +96,19 @@
     const anchor = mindarThree.addAnchor(0);
     anchor.group.add(plane);
 
-    anchor.onTargetFound = () => { videoEl.play().catch(()=>{}); };
-    anchor.onTargetLost  = () => { videoEl.pause(); videoEl.currentTime = 0; };
+    // 👇 Control preview visibility depending on tracking
+    anchor.onTargetFound = () => {
+      preview.style.display = "none";   // hide preview, show AR
+      videoEl.play().catch(()=>{});
+    };
+    anchor.onTargetLost  = () => {
+      preview.style.display = "block";  // show preview again
+      videoEl.pause();
+      videoEl.currentTime = 0;
+    };
 
     // Start AR
     startBtn.addEventListener('click', async () => {
-      // stop preview
-      if (preview.srcObject) {
-        preview.srcObject.getTracks().forEach(track => track.stop());
-      }
-      preview.style.display = "none";
-
-      // iOS policy: must start from user gesture
       videoEl.muted = true;
       try { await videoEl.play(); } catch {}
       videoEl.pause();
