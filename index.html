@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+  <!-- Lock library versions for stability -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+    }
+  }
+  </script>
+
+  <style>
+    html,body { margin:0; height:100%; background:#000; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }
+    #container { width:100vw; height:100vh; position:relative; overflow:hidden; }
+    .ui { position:fixed; left:0; right:0; bottom:0; padding:12px; display:flex; gap:8px; justify-content:center; z-index:10; }
+    button {
+      padding:10px 14px; border:0; border-radius:12px; font-size:16px; font-weight:600; cursor:pointer;
+      background:#16a34a; color:white; box-shadow:0 4px 16px rgba(0,0,0,.25);
+    }
+    button.secondary { background:#374151; }
+    #hint { position:fixed; top:10px; left:0; right:0; text-align:center; color:#fff; opacity:.85; z-index:10; }
+    #hiddenVideo { position:absolute; width:1px; height:1px; left:-9999px; }
+  </style>
+</head>
+<body>
+  <div id="hint">Point your camera at the target image</div>
+  <div id="container"></div>
+
+  <!-- We play this offscreen and map it onto a 3D plane -->
+  <video id="hiddenVideo" src="./promo.mp4"
+         playsinline webkit-playsinline muted preload="auto" loop crossorigin="anonymous"></video>
+
+  <div class="ui">
+    <button id="startBtn">Start AR</button>
+    <button id="muteBtn" class="secondary">Unmute</button>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { MindARThree } from 'mindar-image-three';
+
+    const container = document.querySelector('#container');
+    const videoEl   = document.querySelector('#hiddenVideo');
+    const startBtn  = document.querySelector('#startBtn');
+    const muteBtn   = document.querySelector('#muteBtn');
+
+    // 1) Boot MindAR + Three
+    const mindarThree = new MindARThree({
+      container,
+      imageTargetSrc: './targets.mind', // generated in Step 3
+      uiLoading: "yes", uiScanning: "yes",
+    });
+    const { renderer, scene, camera } = mindarThree;
+
+    // 2) (Optional) light
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+    // 3) Make a VideoTexture → put on a plane
+    const videoTex = new THREE.VideoTexture(videoEl);
+    videoTex.encoding = THREE.sRGBEncoding;
+    videoTex.minFilter = THREE.LinearFilter;
+    videoTex.magFilter = THREE.LinearFilter;
+
+    // Start with 16:9, then adapt to real video aspect
+    const plane = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1/1.7777),
+      new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.DoubleSide, toneMapped:false })
+    );
+    videoEl.addEventListener('loadedmetadata', () => {
+      const aspect = (videoEl.videoWidth || 16) / (videoEl.videoHeight || 9);
+      plane.geometry.dispose();
+      plane.geometry = new THREE.PlaneGeometry(1, 1/aspect);
+    });
+
+    // 4) Anchor the plane to target #0
+    const anchor = mindarThree.addAnchor(0);
+    anchor.group.add(plane);
+
+    // 5) Show/Hide video with tracking
+    anchor.onTargetFound = () => { videoEl.play().catch(()=>{}); };
+    anchor.onTargetLost  = () => { videoEl.pause(); videoEl.currentTime = 0; };
+
+    // 6) Buttons
+    startBtn.addEventListener('click', async () => {
+      // iOS policy: must start from a user gesture; start muted first
+      videoEl.muted = true;
+      try { await videoEl.play(); } catch {}
+      videoEl.pause();
+
+      await mindarThree.start();                 // opens camera permission
+      renderer.setAnimationLoop(() => renderer.render(scene, camera));
+      startBtn.textContent = 'Restart';
+    });
+
+    muteBtn.addEventListener('click', () => {
+      videoEl.muted = !videoEl.muted;
+      muteBtn.textContent = videoEl.muted ? 'Unmute' : 'Mute';
+    });
+
+    // 7) Fullscreen fit
+    window.addEventListener('resize', () => {
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+  </script>
+</body>
+</html>
