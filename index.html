@@ -18,15 +18,25 @@
     html,body { margin:0; height:100%; background:#000; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }
     #container { width:100vw; height:100vh; position:relative; overflow:hidden; }
 
-    /* Style for the hidden MindAR camera feed */
+    /* Camera preview background */
+    #cameraPreview {
+      position:fixed;
+      top:0; left:0;
+      width:100%; height:100%;
+      object-fit:cover;
+      z-index:0;
+    }
+
+    /* 👇 Force show MindAR's hidden camera element */
     video[mindar-camera] {
-      position: fixed !important;
-      top: 0; left: 0;
-      width: 100% !important;
-      height: 100% !important;
-      object-fit: cover;
-      z-index: 0;   /* always behind AR objects */
-      display: block !important;
+      position:fixed !important;
+      top:0; left:0;
+      width:100% !important;
+      height:100% !important;
+      object-fit:cover;
+      z-index:0;
+      display:block !important;
+      background:#000;
     }
 
     .ui { position:fixed; left:0; right:0; bottom:0; padding:12px; display:flex; gap:8px; justify-content:center; z-index:10; }
@@ -43,7 +53,10 @@
   <div id="hint">Point your camera at the target image</div>
   <div id="container"></div>
 
-  <!-- Video that will play on target -->
+  <!-- Live camera preview -->
+  <video id="cameraPreview" autoplay playsinline muted></video>
+
+  <!-- Hidden video mapped to plane -->
   <video id="hiddenVideo" src="./promo.mp4"
          playsinline webkit-playsinline muted preload="auto" loop crossorigin="anonymous"></video>
 
@@ -60,8 +73,14 @@
     const videoEl   = document.querySelector('#hiddenVideo');
     const startBtn  = document.querySelector('#startBtn');
     const muteBtn   = document.querySelector('#muteBtn');
+    const preview   = document.querySelector('#cameraPreview');
 
-    // Setup MindAR
+    // Start live preview right away
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+      .then(stream => { preview.srcObject = stream; })
+      .catch(err => console.error("Camera error:", err));
+
+    // MindAR setup
     const mindarThree = new MindARThree({
       container,
       imageTargetSrc: './targets.mind',
@@ -69,17 +88,22 @@
     });
     const { renderer, scene, camera } = mindarThree;
 
+    // 👇 Make renderer transparent so preview can show underneath
+    renderer.setClearColor(0x000000, 0);
+
     scene.add(new THREE.AmbientLight(0xffffff, 1));
 
-    // Video texture mapped onto a plane
     const videoTex = new THREE.VideoTexture(videoEl);
+    videoTex.encoding = THREE.sRGBEncoding;
+    videoTex.minFilter = THREE.LinearFilter;
+    videoTex.magFilter = THREE.LinearFilter;
+
     const plane = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1/1.7777),
       new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.DoubleSide, toneMapped:false })
     );
-
     videoEl.addEventListener('loadedmetadata', () => {
-      const aspect = videoEl.videoWidth / videoEl.videoHeight;
+      const aspect = (videoEl.videoWidth || 16) / (videoEl.videoHeight || 9);
       plane.geometry.dispose();
       plane.geometry = new THREE.PlaneGeometry(1, 1/aspect);
     });
@@ -87,9 +111,16 @@
     const anchor = mindarThree.addAnchor(0);
     anchor.group.add(plane);
 
-    // Show/hide AR video only (camera stays visible always)
-    anchor.onTargetFound = () => { videoEl.play().catch(()=>{}); };
-    anchor.onTargetLost  = () => { videoEl.pause(); videoEl.currentTime = 0; };
+    // 👇 Control preview visibility depending on tracking
+    anchor.onTargetFound = () => {
+      preview.style.display = "none";   // hide preview, show AR
+      videoEl.play().catch(()=>{});
+    };
+    anchor.onTargetLost  = () => {
+      preview.style.display = "block";  // show preview again
+      videoEl.pause();
+      videoEl.currentTime = 0;
+    };
 
     // Start AR
     startBtn.addEventListener('click', async () => {
@@ -102,10 +133,14 @@
       startBtn.textContent = 'Restart';
     });
 
-    // Toggle mute
+    // Mute toggle
     muteBtn.addEventListener('click', () => {
       videoEl.muted = !videoEl.muted;
       muteBtn.textContent = videoEl.muted ? 'Unmute' : 'Mute';
+    });
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(container.clientWidth, container.clientHeight);
     });
   </script>
 </body>
