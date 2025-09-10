@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 
-  <!-- Lock library versions for stability -->
+  <!-- Lock library versions -->
   <script type="importmap">
   {
     "imports": {
@@ -16,7 +16,7 @@
   </script>
 
   <style>
-    html,body { margin:0; height:100%; background:#000; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }
+    html,body { margin:0; height:100%; background:#000; font-family:sans-serif; }
     #container { width:100vw; height:100vh; position:relative; overflow:hidden; }
     .ui { position:fixed; left:0; right:0; bottom:0; padding:12px; display:flex; gap:8px; justify-content:center; z-index:10; }
     button {
@@ -32,7 +32,7 @@
   <div id="hint">Point your camera at the target image</div>
   <div id="container"></div>
 
-  <!-- We play this offscreen and map it onto a 3D plane -->
+  <!-- Promo video mapped onto marker -->
   <video id="hiddenVideo" src="./promo.mp4"
          playsinline webkit-playsinline muted preload="auto" loop crossorigin="anonymous"></video>
 
@@ -46,11 +46,11 @@
     import { MindARThree } from 'mindar-image-three';
 
     const container = document.querySelector('#container');
-    const videoEl   = document.querySelector('#hiddenVideo');
+    const promoVideo = document.querySelector('#hiddenVideo');
     const startBtn  = document.querySelector('#startBtn');
     const muteBtn   = document.querySelector('#muteBtn');
 
-    // 1) Boot MindAR + Three
+    // Initialize MindAR
     const mindarThree = new MindARThree({
       container,
       imageTargetSrc: './targets.mind',
@@ -58,34 +58,10 @@
     });
     const { renderer, scene, camera } = mindarThree;
 
-    // 2) Add ambient light
+    // Light
     scene.add(new THREE.AmbientLight(0xffffff, 1));
 
-    // 3) Make a VideoTexture → put on a plane
-    const videoTex = new THREE.VideoTexture(videoEl);
-    videoTex.encoding = THREE.sRGBEncoding;
-    videoTex.minFilter = THREE.LinearFilter;
-    videoTex.magFilter = THREE.LinearFilter;
-
-    const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(1, 1/1.7777),
-      new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.DoubleSide, toneMapped:false })
-    );
-    videoEl.addEventListener('loadedmetadata', () => {
-      const aspect = (videoEl.videoWidth || 16) / (videoEl.videoHeight || 9);
-      plane.geometry.dispose();
-      plane.geometry = new THREE.PlaneGeometry(1, 1/aspect);
-    });
-
-    // 4) Anchor the plane to target #0
-    const anchor = mindarThree.addAnchor(0);
-    anchor.group.add(plane);
-
-    // 5) Show/Hide video with tracking
-    anchor.onTargetFound = () => { videoEl.play().catch(()=>{}); };
-    anchor.onTargetLost  = () => { videoEl.pause(); videoEl.currentTime = 0; };
-
-    // === NEW PART: Always show camera background ===
+    // === Show live camera as background ===
     const backgroundTexture = new THREE.VideoTexture(mindarThree.video);
     const backgroundMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(2, 2),
@@ -98,28 +74,49 @@
     const backgroundCamera = new THREE.Camera();
     backgroundScene.add(backgroundMesh);
 
-    // 6) Buttons
-    startBtn.addEventListener('click', async () => {
-      videoEl.muted = true;
-      try { await videoEl.play(); } catch {}
-      videoEl.pause();
+    // === Promo video on marker plane ===
+    const promoTex = new THREE.VideoTexture(promoVideo);
+    promoTex.encoding = THREE.sRGBEncoding;
+    promoTex.minFilter = THREE.LinearFilter;
+    promoTex.magFilter = THREE.LinearFilter;
 
-      await mindarThree.start();  // opens camera permission
+    const plane = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1/1.777),
+      new THREE.MeshBasicMaterial({ map: promoTex, side: THREE.DoubleSide, toneMapped:false })
+    );
+
+    promoVideo.addEventListener('loadedmetadata', () => {
+      const aspect = promoVideo.videoWidth / promoVideo.videoHeight;
+      plane.geometry.dispose();
+      plane.geometry = new THREE.PlaneGeometry(1, 1/aspect);
+    });
+
+    const anchor = mindarThree.addAnchor(0);
+    anchor.group.add(plane);
+
+    // Play/stop video on detection
+    anchor.onTargetFound = () => { promoVideo.play().catch(()=>{}); };
+    anchor.onTargetLost  = () => { promoVideo.pause(); promoVideo.currentTime = 0; };
+
+    // === Buttons ===
+    startBtn.addEventListener('click', async () => {
+      promoVideo.muted = true; // start muted
+      await mindarThree.start();
+
       renderer.autoClear = false;
       renderer.setAnimationLoop(() => {
         renderer.clear();
-        renderer.render(backgroundScene, backgroundCamera); // draw camera
+        renderer.render(backgroundScene, backgroundCamera); // draw camera feed
         renderer.render(scene, camera);                     // draw AR objects
       });
-      startBtn.textContent = 'Restart';
+      startBtn.textContent = "Restart";
     });
 
     muteBtn.addEventListener('click', () => {
-      videoEl.muted = !videoEl.muted;
-      muteBtn.textContent = videoEl.muted ? 'Unmute' : 'Mute';
+      promoVideo.muted = !promoVideo.muted;
+      muteBtn.textContent = promoVideo.muted ? "Unmute" : "Mute";
     });
 
-    // 7) Fullscreen fit
     window.addEventListener('resize', () => {
       renderer.setSize(container.clientWidth, container.clientHeight);
     });
