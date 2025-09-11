@@ -27,7 +27,7 @@
       z-index:0;
     }
 
-    /* Keep MindAR’s internal camera video hidden */
+    /* Hide MindAR’s internal camera feed */
     video[mindar-camera] {
       display:none !important;
     }
@@ -68,25 +68,27 @@
     const muteBtn   = document.querySelector('#muteBtn');
     const preview   = document.querySelector('#cameraPreview');
 
-    // Start live preview right away
+    // Start live preview immediately
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
       .then(stream => { preview.srcObject = stream; })
       .catch(err => console.error("Camera error:", err));
 
-    // MindAR setup with transparent background
+    // MindAR setup (transparent renderer, no internal video)
     const mindarThree = new MindARThree({
       container,
       imageTargetSrc: './targets.mind',
-      uiLoading: "yes", uiScanning: "yes",
-      rendererOptions: { alpha: true }   // 👈 allow transparency
+      uiLoading: false, uiScanning: false,
+      rendererOptions: { alpha: true }
     });
     const { renderer, scene, camera } = mindarThree;
 
-    // Make renderer transparent
     renderer.setClearColor(0x000000, 0);
+    renderer.autoClear = false; // 👈 prevents black clear pass
+    mindarThree.videoTexture = null; // 👈 disable MindAR’s internal video feed
 
     scene.add(new THREE.AmbientLight(0xffffff, 1));
 
+    // Map promo video onto plane
     const videoTex = new THREE.VideoTexture(videoEl);
     videoTex.encoding = THREE.sRGBEncoding;
     videoTex.minFilter = THREE.LinearFilter;
@@ -94,7 +96,7 @@
 
     const plane = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1/1.7777),
-      new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.DoubleSide, toneMapped:false })
+      new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.DoubleSide, toneMapped:false, transparent:true })
     );
     videoEl.addEventListener('loadedmetadata', () => {
       const aspect = (videoEl.videoWidth || 16) / (videoEl.videoHeight || 9);
@@ -105,7 +107,7 @@
     const anchor = mindarThree.addAnchor(0);
     anchor.group.add(plane);
 
-    // Don’t hide/show preview anymore → keep camera visible always
+    // Target events
     anchor.onTargetFound = () => {
       videoEl.play().catch(()=>{});
     };
@@ -121,7 +123,13 @@
       videoEl.pause();
 
       await mindarThree.start();
-      renderer.setAnimationLoop(() => renderer.render(scene, camera));
+
+      // 🔑 custom render loop (keeps camera visible, renders AR)
+      renderer.setAnimationLoop(() => {
+        renderer.clear();
+        renderer.render(scene, camera);
+      });
+
       startBtn.textContent = 'Restart';
     });
 
