@@ -18,7 +18,7 @@
     html,body { margin:0; height:100%; background:#000; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }
     #container { width:100vw; height:100vh; position:relative; overflow:hidden; }
 
-    /* Camera preview background */
+    /* Live camera preview background */
     #cameraPreview {
       position:fixed;
       top:0; left:0;
@@ -27,17 +27,10 @@
       z-index:0;
     }
 
-    /* 👇 Force show MindAR's hidden camera element */
+    /* Keep MindAR’s internal camera video hidden */
     video[mindar-camera] {
-  position: fixed !important;
-  top: 0; left: 0;
-  width: 100% !important;
-  height: 100% !important;
-  object-fit: cover !important;
-  z-index: -1 !important;   /* behind the 3D scene */
-   display: block !important;          /* keep hidden until AR starts */
-  
-}
+      display:none !important;
+    }
 
     .ui { position:fixed; left:0; right:0; bottom:0; padding:12px; display:flex; gap:8px; justify-content:center; z-index:10; }
     button {
@@ -80,16 +73,16 @@
       .then(stream => { preview.srcObject = stream; })
       .catch(err => console.error("Camera error:", err));
 
-    // MindAR setup
+    // MindAR setup with transparent background
     const mindarThree = new MindARThree({
       container,
       imageTargetSrc: './targets.mind',
       uiLoading: "yes", uiScanning: "yes",
-      rendererOptions: { alpha: true,preserveDrawingBuffer: true } 
+      rendererOptions: { alpha: true }   // 👈 allow transparency
     });
     const { renderer, scene, camera } = mindarThree;
 
-    // 👇 Make renderer transparent so preview can show underneath
+    // Make renderer transparent
     renderer.setClearColor(0x000000, 0);
 
     scene.add(new THREE.AmbientLight(0xffffff, 1));
@@ -112,13 +105,11 @@
     const anchor = mindarThree.addAnchor(0);
     anchor.group.add(plane);
 
-    // 👇 Control preview visibility depending on tracking
+    // Don’t hide/show preview anymore → keep camera visible always
     anchor.onTargetFound = () => {
-      preview.style.display = "none";   // hide preview, show AR
       videoEl.play().catch(()=>{});
     };
     anchor.onTargetLost  = () => {
-      preview.style.display = "block";  // show preview again
       videoEl.pause();
       videoEl.currentTime = 0;
     };
@@ -132,9 +123,6 @@
       await mindarThree.start();
       renderer.setAnimationLoop(() => renderer.render(scene, camera));
       startBtn.textContent = 'Restart';
-      preview.style.display = "none";
-  const mindarCam = document.querySelector("video[mindar-camera]");
-  if (mindarCam) mindarCam.style.display = "block";
     });
 
     // Mute toggle
