@@ -36,7 +36,7 @@
   object-fit: cover !important;
   z-index: -1 !important;   /* behind the 3D scene */
    display: block !important;          /* keep hidden until AR starts */
-  background: #000;
+  
 }
 
     .ui { position:fixed; left:0; right:0; bottom:0; padding:12px; display:flex; gap:8px; justify-content:center; z-index:10; }
@@ -85,7 +85,7 @@
       container,
       imageTargetSrc: './targets.mind',
       uiLoading: "yes", uiScanning: "yes",
-      rendererOptions: { alpha: true } 
+      rendererOptions: { alpha: true,preserveDrawingBuffer: true } 
     });
     const { renderer, scene, camera } = mindarThree;
 
