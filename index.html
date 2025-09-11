@@ -34,8 +34,8 @@
   width: 100% !important;
   height: 100% !important;
   object-fit: cover !important;
-  z-index: 0 !important;   /* behind the 3D scene */
-  display: none;           /* keep hidden until AR starts */
+  z-index: -1 !important;   /* behind the 3D scene */
+   display: block !important;          /* keep hidden until AR starts */
   background: #000;
 }
 
@@ -85,6 +85,7 @@
       container,
       imageTargetSrc: './targets.mind',
       uiLoading: "yes", uiScanning: "yes",
+      rendererOptions: { alpha: true } 
     });
     const { renderer, scene, camera } = mindarThree;
 
