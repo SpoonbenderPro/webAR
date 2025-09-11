@@ -29,15 +29,15 @@
 
     /* 👇 Force show MindAR's hidden camera element */
     video[mindar-camera] {
-      position:fixed !important;
-      top:0; left:0;
-      width:100% !important;
-      height:100% !important;
-      object-fit:cover;
-      z-index:0;
-      display:block !important;
-      background:#000;
-    }
+  position: fixed !important;
+  top: 0; left: 0;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  z-index: 0 !important;   /* behind the 3D scene */
+  display: none;           /* keep hidden until AR starts */
+  background: #000;
+}
 
     .ui { position:fixed; left:0; right:0; bottom:0; padding:12px; display:flex; gap:8px; justify-content:center; z-index:10; }
     button {
@@ -131,6 +131,9 @@
       await mindarThree.start();
       renderer.setAnimationLoop(() => renderer.render(scene, camera));
       startBtn.textContent = 'Restart';
+      preview.style.display = "none";
+  const mindarCam = document.querySelector("video[mindar-camera]");
+  if (mindarCam) mindarCam.style.display = "block";
     });
 
     // Mute toggle
