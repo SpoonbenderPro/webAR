@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>WebAR — Stick-to-Camera + CTA</title>
+  <title>WebAR — Image Scan → Spawn 3D Model (Stays)</title>
 
-  <!-- ESM imports (your working method) -->
+  <!-- ESM imports (same method as your working file) -->
   <script type="importmap">
   {
     "imports": {
@@ -26,42 +26,36 @@
     #ui{position:fixed;left:12px;right:12px;bottom:12px;z-index:4;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
     button,a.button{padding:10px 14px;border:0;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;background:#4f46e5;color:#fff;text-decoration:none}
     button.secondary{background:#374151}
-    #hiddenVideo{display:none}
-    #nudge{position:fixed;left:50%;transform:translateX(-50%);bottom:86px;z-index:5;color:#fff;background:#000a;padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);display:none}
   </style>
 </head>
 <body>
   <div id="hint">Point your camera at the target image</div>
   <div id="container"></div>
 
-  <!-- Source video for the plane -->
-  <video id="hiddenVideo" src="./promo.mp4" playsinline webkit-playsinline muted preload="auto" loop></video>
-
   <div id="ui">
     <button id="startBtn">Start AR</button>
-    <button id="muteBtn" class="secondary">Unmute</button>
     <button id="restartBtn" class="secondary">Restart</button>
     <a id="ctaBtn" class="button" href="#" target="_blank" rel="noopener">Visit Site</a>
   </div>
 
-  <div id="nudge">🔊 Tap “Unmute” to enable audio</div>
-
   <script type="module">
     import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
     import { MindARThree } from 'mindar-image-three';
 
     // 👉 Set your website here
     const CTA_URL = 'https://example.com';
     document.getElementById('ctaBtn').href = CTA_URL;
 
-    const container = document.getElementById('container');
-    const startBtn  = document.getElementById('startBtn');
-    const restartBtn= document.getElementById('restartBtn');
-    const muteBtn   = document.getElementById('muteBtn');
-    const videoEl   = document.getElementById('hiddenVideo');
-    const hint      = document.getElementById('hint');
-    const nudge     = document.getElementById('nudge');
+    // 👉 Set your model path here
+    const MODEL_URL = './model.glb';
 
+    const container  = document.getElementById('container');
+    const startBtn   = document.getElementById('startBtn');
+    const restartBtn = document.getElementById('restartBtn');
+    const hint       = document.getElementById('hint');
+
+    // MindAR init (same as your reference)
     const mindar = new MindARThree({
       container,
       imageTargetSrc: './targets.mind',
@@ -71,72 +65,106 @@
     const { renderer, scene, camera } = mindar;
     renderer.setClearColor(0x000000, 0);
     renderer.domElement.style.touchAction = 'none';
-    scene.add(new THREE.AmbientLight(0xffffff, 1));
 
-    // Video texture + plane
-    const videoTex = new THREE.VideoTexture(videoEl);
-    videoTex.encoding = THREE.sRGBEncoding;
-    const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(1, 0.56),
-      new THREE.MeshBasicMaterial({ map: videoTex, side: THREE.DoubleSide, toneMapped:false, transparent:true })
-    );
-    videoEl.addEventListener('loadedmetadata', () => {
-      const aspect = (videoEl.videoHeight || 9) / (videoEl.videoWidth || 16);
-      plane.scale.set(1, aspect, 1);
+    // Lighting for 3D model (video didn’t need this, models do)
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(1, 2, 1);
+    scene.add(dir);
+
+    // Anchor for target index 0
+    const anchor = mindar.addAnchor(0);
+
+    // A parent in world-space where we’ll place the model once, then “lock” it there
+    const worldRoot = new THREE.Group();
+    scene.add(worldRoot);
+
+    // Model loading
+    const loader = new GLTFLoader();
+    let modelPrefab = null;   // loaded GLTF scene (template)
+    let modelInstance = null; // the actually spawned instance
+    let spawned = false;      // prevent duplicate spawns
+
+    // Preload the model
+    loader.load(MODEL_URL, (gltf) => {
+      modelPrefab = gltf.scene;
+      // Optional: normalize initial scale if your model is huge/tiny
+      modelPrefab.scale.set(1,1,1);
+      // Don’t add to scene yet; we’ll clone on detection
+    }, undefined, (err) => {
+      console.error('Failed to load model:', err);
     });
 
-    // Anchor on target index 0
-    const anchor = mindar.addAnchor(0);
-    anchor.group.add(plane);
+    // Utility: copy current anchor world transform into worldRoot
+    const tmpPos = new THREE.Vector3();
+    const tmpQuat = new THREE.Quaternion();
+    const tmpScale = new THREE.Vector3();
 
-    // 🔁 Stick-to-camera mode: when target lost, reparent plane to the camera so it follows view
-    const placeInFrontOfCamera = () => {
-      camera.add(plane);
-      plane.position.set(0, 0, -1.0);    // 1 meter in front
-      plane.rotation.set(0, 0, 0);
-      plane.visible = true;
-    };
-    const placeOnAnchor = () => {
-      // reset local transform and reattach to the anchor
-      plane.position.set(0,0,0);
-      plane.rotation.set(0,0,0);
-      anchor.group.add(plane);
-      plane.visible = true;
-    };
+    function lockWorldTransformToAnchor() {
+      // Ensure world matrices are up to date
+      anchor.group.updateWorldMatrix(true, true);
 
+      anchor.group.getWorldPosition(tmpPos);
+      anchor.group.getWorldQuaternion(tmpQuat);
+      anchor.group.getWorldScale(tmpScale);
+
+      worldRoot.position.copy(tmpPos);
+      worldRoot.quaternion.copy(tmpQuat);
+      worldRoot.scale.copy(tmpScale);
+      worldRoot.updateMatrixWorld(true);
+    }
+
+    // When target is found the first time → spawn and lock
     anchor.onTargetFound = () => {
       hint.textContent = 'Tracking ✓';
-      placeOnAnchor();
-      if (videoEl.paused) videoEl.play().catch(()=>{ showNudge(); });
+      if (!spawned && modelPrefab) {
+        // 1) Lock a world-space pivot where the target is
+        lockWorldTransformToAnchor();
+
+        // 2) Clone and place the model under that world pivot
+        modelInstance = modelPrefab.clone(true);
+        worldRoot.add(modelInstance);
+
+        // 3) Mark as spawned so it persists and doesn’t duplicate
+        spawned = true;
+        hint.textContent = 'Placed ✓ You can move away.';
+      } else if (!spawned && !modelPrefab) {
+        // Model not yet loaded but target found; try again next time
+        hint.textContent = 'Tracking ✓ (loading model...)';
+      }
     };
+
+    // When target is lost → do nothing; the model stays
     anchor.onTargetLost = () => {
-      hint.textContent = 'Move back to the target…';
-      placeInFrontOfCamera();          // keep video attached to camera view
-      // keep playing; don't pause/reset
+      if (spawned) {
+        hint.textContent = 'Model placed — move around freely';
+      } else {
+        hint.textContent = 'Move back to the target…';
+      }
     };
 
-    // UI: mute/unmute, restart, start
-    const setMuteUI = () => { muteBtn.textContent = videoEl.muted ? 'Unmute' : 'Mute'; };
-    const showNudge = () => { nudge.style.display='block'; setTimeout(()=> nudge.style.display='none', 2000); };
-    setMuteUI();
-
-    muteBtn.addEventListener('click', async () => {
-      videoEl.muted = !videoEl.muted; setMuteUI();
-      try { await videoEl.play(); } catch { showNudge(); }
-    });
-
+    // Buttons
     restartBtn.addEventListener('click', async () => {
       try { await mindar.stop(); } catch {}
+      // Clear any existing render loop (safety)
+      renderer.setAnimationLoop(null);
+
+      // (Optional) If you want a fresh placement each restart:
+      // scene.remove(worldRoot);
+      // worldRoot.clear();
+      // scene.add(worldRoot);
+      // spawned = false;
+      // modelInstance = null;
+
       await mindar.start();
+      renderer.setAnimationLoop(() => renderer.render(scene, camera));
+      hint.textContent = 'Point your camera at the target image';
     });
 
     startBtn.addEventListener('click', async () => {
       startBtn.disabled = true; startBtn.textContent = 'Starting…';
-      // Nudge iOS autoplay
-      videoEl.muted = true; try { await videoEl.play(); } catch {} videoEl.pause();
-
       try {
-        await mindar.start();                          // camera prompt
+        await mindar.start();                          // triggers camera prompt
         renderer.setAnimationLoop(()=>renderer.render(scene, camera));
         startBtn.textContent = 'Running…';
       } catch (e) {
@@ -145,7 +173,7 @@
       }
     });
 
-    // Keep renderer sized to container
+    // Keep renderer sized to container (same as reference)
     const ro = new ResizeObserver(() => {
       renderer.setSize(container.clientWidth, container.clientHeight, false);
     });
