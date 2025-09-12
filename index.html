@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>WebAR — GLB Debug & Place-Once</title>
+  <title>WebAR — Place GLB (with Beacons & Ping)</title>
 
   <script type="importmap">
   {
@@ -27,12 +27,13 @@
   </style>
 </head>
 <body>
-  <div id="hint">Starting…</div>
+  <div id="hint">Press Start AR</div>
   <div id="container"></div>
 
   <div id="ui">
     <button id="startBtn">Start AR</button>
     <button id="restartBtn" class="secondary">Restart</button>
+    <button id="pingBtn" class="secondary">Ping (show in front)</button>
     <a id="ctaBtn" class="button" href="#" target="_blank" rel="noopener">Visit Site</a>
   </div>
 
@@ -42,27 +43,23 @@
     import { GLTFLoader }  from 'three/addons/loaders/GLTFLoader.js';
     import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
-    // ========= CONFIG =========
-    const CTA_URL = 'https://example.com';
-    const MODEL_URL = './model.glb';   // put model.glb next to index.html
-    const DEBUG_PREVIEW = true;        // true = show in front of camera immediately
-    const FIT_MODE = 'max';            // 'width' | 'height' | 'max'
-    const FIT_SIZE_M = 0.6;            // meters along FIT_MODE axis
-    const MODEL_LIFT_M = 0.02;         // raise above surface
-    // Common orientation fixes (toggle as needed)
-    const ROT_FIX_X = -Math.PI/2;      // many DCCs export lying on back; try -PI/2
-    const ROT_FIX_Y = 0;
-    const ROT_FIX_Z = 0;
-    // ==========================
+    // ======== CONFIG (edit as needed) ========
+    const CTA_URL    = 'https://example.com';
+    const MODEL_URL  = './model.glb';     // put model.glb next to index.html
+    const FIT_MODE   = 'max';              // 'width' | 'height' | 'max'
+    const FIT_SIZE_M = 0.6;                // meters along FIT_MODE axis
+    const MODEL_LIFT = 0.02;               // raise above the image
+    const ROT_FIX    = { x: -Math.PI/2, y: 0, z: 0 }; // common: lay model upright
+    // =========================================
 
-    // UI
     document.getElementById('ctaBtn').href = CTA_URL;
+
     const container  = document.getElementById('container');
     const startBtn   = document.getElementById('startBtn');
     const restartBtn = document.getElementById('restartBtn');
+    const pingBtn    = document.getElementById('pingBtn');
     const hint       = document.getElementById('hint');
 
-    // MindAR
     const mindar = new MindARThree({
       container,
       imageTargetSrc: './targets.mind',
@@ -73,27 +70,37 @@
     renderer.setClearColor(0x000000, 0);
     renderer.domElement.style.touchAction = 'none';
 
+    // Ensure generous clipping planes so things don’t disappear
+    camera.near = 0.01;
+    camera.far  = 200.0;
+    camera.updateProjectionMatrix();
+
     // Lights
     scene.add(new THREE.AmbientLight(0xffffff, 0.95));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9);
     dir.position.set(1, 2, 1);
     scene.add(dir);
 
-    // Debug helpers (so we know where things are)
-    const sceneAxes = new THREE.AxesHelper(0.3);
+    // Debug axes in scene (optional small)
+    const sceneAxes = new THREE.AxesHelper(0.25);
     sceneAxes.position.set(0,0,-0.5);
     scene.add(sceneAxes);
 
-    // Anchor (used only to read pose once)
+    // Anchor (we read its pose once)
     const anchor = mindar.addAnchor(0);
 
-    // World-space pivot where the model lives permanently after placement
+    // World-space pivot where placed model lives
     const worldRoot = new THREE.Group();
     scene.add(worldRoot);
-    const worldAxes = new THREE.AxesHelper(0.2);
-    worldRoot.add(worldAxes);
 
-    // Loaders
+    // Add a tall beacon at worldRoot so it’s visible from afar
+    const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff0077 });
+    const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 2.0, 16), beaconMat);
+    beacon.position.y = 1.0; // so it rises 1m above placement
+    beacon.visible = false;  // will show after placement
+    worldRoot.add(beacon);
+
+    // Load model
     const gltfLoader = new GLTFLoader();
     const draco = new DRACOLoader();
     draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
@@ -101,109 +108,125 @@
     gltfLoader.setDRACOLoader(draco);
 
     let modelPrefab = null;
+    let placedInstance = null;
     let spawned = false;
-    let previewInstance = null;
+    let rescuePreview = null;
 
-    // Utilities
+    function makeRenderable(object){
+      object.traverse((o)=>{
+        o.frustumCulled = false;
+        if (o.isMesh && o.material){
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach(m=>{ m.side = THREE.DoubleSide; if ('toneMapped' in m) m.toneMapped = true; });
+        }
+      });
+    }
     function centerByBounds(object){
       const box = new THREE.Box3().setFromObject(object);
       const center = box.getCenter(new THREE.Vector3());
       object.position.sub(center);
       object.updateMatrixWorld(true);
     }
-    function fitByBounds(object, mode='max', desired=1.0){
+    function fitByBounds(object, mode, desired){
       const box = new THREE.Box3().setFromObject(object);
       const s = box.getSize(new THREE.Vector3());
       let current = s.x;
-      if (mode === 'height') current = s.y;
-      if (mode === 'max')    current = Math.max(s.x, s.y, s.z);
+      if (mode==='height') current = s.y;
+      if (mode==='max') current = Math.max(s.x, s.y, s.z);
       const scale = (current > 1e-6) ? (desired / current) : 1;
       object.scale.multiplyScalar(scale);
       object.updateMatrixWorld(true);
     }
-    function makeRenderable(object){
-      object.traverse((o)=>{
-        o.frustumCulled = false;
-        if (o.isMesh && o.material){
-          const mats = Array.isArray(o.material) ? o.material : [o.material];
-          mats.forEach(m=>{
-            m.side = THREE.DoubleSide;
-            if ('toneMapped' in m) m.toneMapped = true;
-          });
-          o.castShadow = false; o.receiveShadow = false;
-        }
-      });
-    }
-    const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3();
-    function lockWorldTransformFromAnchor(anchorGroup, targetGroup){
+    function lockWorldFromAnchor(anchorGroup, targetGroup){
+      const p=new THREE.Vector3(), q=new THREE.Quaternion(), s=new THREE.Vector3();
       anchorGroup.updateWorldMatrix(true, true);
-      anchorGroup.getWorldPosition(_p);
-      anchorGroup.getWorldQuaternion(_q);
-      anchorGroup.getWorldScale(_s);
-      targetGroup.position.copy(_p);
-      targetGroup.quaternion.copy(_q);
-      targetGroup.scale.set(1,1,1); // ignore anchor scale for stability
+      anchorGroup.getWorldPosition(p);
+      anchorGroup.getWorldQuaternion(q);
+      // ignore anchor scale for stability
+      targetGroup.position.copy(p);
+      targetGroup.quaternion.copy(q);
+      targetGroup.scale.set(1,1,1);
       targetGroup.updateMatrixWorld(true);
     }
+    function modelCenterWorld(obj){
+      const box = new THREE.Box3().setFromObject(obj);
+      const c = box.getCenter(new THREE.Vector3());
+      return c;
+    }
+    function isInView(worldPoint, cam){
+      const proj = worldPoint.clone().project(cam);
+      const inScreen = proj.x >= -1 && proj.x <= 1 && proj.y >= -1 && proj.y <= 1 && proj.z >= -1 && proj.z <= 1;
+      return inScreen;
+    }
 
-    function loadModel(){
-      return new Promise((resolve, reject)=>{
+    async function loadModel(){
+      if (modelPrefab) return;
+      await new Promise((resolve, reject)=>{
         gltfLoader.load(
           MODEL_URL,
           (gltf)=>{
             modelPrefab = gltf.scene;
             makeRenderable(modelPrefab);
-            console.log('GLB ok');
+            console.log('GLB loaded ✓');
             resolve();
           },
           (xhr)=>{
             const pct = xhr.total ? Math.round((xhr.loaded/xhr.total)*100) : null;
             if (pct!==null) hint.textContent = `Loading model… ${pct}%`;
           },
-          (err)=>{ console.error('Load error', err); hint.textContent='Failed to load model'; reject(err); }
+          (err)=>{ console.error('Model load error:', err); hint.textContent='Failed to load model'; reject(err); }
         );
       });
     }
 
-    // 1) PREVIEW: show in front of camera to guarantee visibility
-    async function showPreview(){
-      if (!modelPrefab) await loadModel();
-      if (previewInstance) camera.remove(previewInstance);
-      previewInstance = modelPrefab.clone(true);
-      centerByBounds(previewInstance);
-      fitByBounds(previewInstance, FIT_MODE, FIT_SIZE_M);
-      previewInstance.rotation.set(ROT_FIX_X, ROT_FIX_Y, ROT_FIX_Z);
-      previewInstance.position.set(0, -0.05, -0.8); // slightly below center, 0.8m out
-      camera.add(previewInstance);
-      hint.textContent = 'Preview visible — press Start AR and scan the image';
+    function addBoxHelperTo(object){
+      const box = new THREE.Box3().setFromObject(object);
+      const helper = new THREE.Box3Helper(box, 0x00ff00);
+      object.add(helper);
     }
 
-    // 2) AR PLACE-ONCE: on first detection, lock pose and add clone to world
+    function showRescuePreview(seconds=3){
+      // brief copy in front of camera so user sees it regardless of placement
+      if (!modelPrefab) return;
+      if (rescuePreview) camera.remove(rescuePreview);
+      rescuePreview = modelPrefab.clone(true);
+      centerByBounds(rescuePreview);
+      fitByBounds(rescuePreview, FIT_MODE, FIT_SIZE_M);
+      rescuePreview.rotation.set(ROT_FIX.x, ROT_FIX.y, ROT_FIX.z);
+      rescuePreview.position.set(0, -0.05, -0.8);
+      camera.add(rescuePreview);
+      setTimeout(()=>{ if (rescuePreview){ camera.remove(rescuePreview); rescuePreview=null; } }, seconds*1000);
+    }
+
+    // Anchor events
     anchor.onTargetFound = async ()=>{
       hint.textContent = 'Tracking ✓';
       if (spawned) return;
-      if (!modelPrefab) await loadModel();
+      await loadModel();
 
-      // lock where the target is now
-      lockWorldTransformFromAnchor(anchor.group, worldRoot);
+      lockWorldFromAnchor(anchor.group, worldRoot);
 
-      // fresh instance, centered & fitted
-      const instance = modelPrefab.clone(true);
-      centerByBounds(instance);
-      fitByBounds(instance, FIT_MODE, FIT_SIZE_M);
-      instance.rotation.set(ROT_FIX_X, ROT_FIX_Y, ROT_FIX_Z);
-      instance.position.y += MODEL_LIFT_M;
+      placedInstance = modelPrefab.clone(true);
+      centerByBounds(placedInstance);
+      fitByBounds(placedInstance, FIT_MODE, FIT_SIZE_M);
+      placedInstance.rotation.set(ROT_FIX.x, ROT_FIX.y, ROT_FIX.z);
+      placedInstance.position.y += MODEL_LIFT;
 
-      // debug helpers on the instance
-      const box = new THREE.Box3().setFromObject(instance);
-      const boxHelper = new THREE.Box3Helper(box, 0x00ff00);
-      instance.add(boxHelper);
+      addBoxHelperTo(placedInstance);
+      worldRoot.add(placedInstance);
 
-      worldRoot.add(instance);
+      // turn on the tall beacon so you can spot the placement from far away
+      beacon.visible = true;
+
       spawned = true;
       hint.textContent = 'Placed ✓ You can move away.';
-      // remove preview if it was shown
-      if (previewInstance) { camera.remove(previewInstance); previewInstance = null; }
+
+      // If the placed model center isn’t in view, ping a rescue preview
+      const c = modelCenterWorld(placedInstance);
+      if (!isInView(c, camera)){
+        console.log('Placed model not in current view → showing rescue preview');
+        showRescuePreview(4);
+      }
     };
 
     anchor.onTargetLost = ()=>{
@@ -211,20 +234,6 @@
     };
 
     // Buttons
-    restartBtn.addEventListener('click', async ()=>{
-      try { await mindar.stop(); } catch {}
-      renderer.setAnimationLoop(null);
-
-      worldRoot.clear();
-      spawned = false;
-      if (previewInstance){ camera.remove(previewInstance); previewInstance = null; }
-
-      await mindar.start();
-      renderer.setAnimationLoop(()=>renderer.render(scene, camera));
-      hint.textContent = 'Point your camera at the target image';
-      if (DEBUG_PREVIEW) showPreview();
-    });
-
     startBtn.addEventListener('click', async ()=>{
       startBtn.disabled = true; startBtn.textContent = 'Starting…';
       try{
@@ -232,19 +241,36 @@
         renderer.setAnimationLoop(()=>renderer.render(scene, camera));
         startBtn.textContent = 'Running…';
         hint.textContent = 'Scan the image target…';
-        if (DEBUG_PREVIEW) showPreview();
       }catch(e){
         console.error(e);
         startBtn.disabled = false; startBtn.textContent = 'Start AR (Retry)';
-        hint.textContent = 'Start failed — check camera permissions';
+        hint.textContent = 'Start failed — check camera permission';
       }
+    });
+
+    restartBtn.addEventListener('click', async ()=>{
+      try { await mindar.stop(); } catch {}
+      renderer.setAnimationLoop(null);
+
+      worldRoot.clear();
+      worldRoot.add(beacon);
+      beacon.visible = false;
+      placedInstance = null;
+      spawned = false;
+
+      await mindar.start();
+      renderer.setAnimationLoop(()=>renderer.render(scene, camera));
+      hint.textContent = 'Point your camera at the target image';
+    });
+
+    // Manual “Ping” to show a copy in front of camera any time
+    pingBtn.addEventListener('click', async ()=>{
+      await loadModel();
+      showRescuePreview(4);
     });
 
     // Resize
     new ResizeObserver(()=>renderer.setSize(container.clientWidth, container.clientHeight, false)).observe(container);
-
-    // initial hint
-    hint.textContent = 'Press Start AR';
   </script>
 </body>
 </html>
