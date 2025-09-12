@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>WebAR — Image Scan → Spawn GLB (Auto-fit)</title>
+  <title>WebAR — GLB Debug & Place-Once</title>
 
   <script type="importmap">
   {
@@ -20,14 +20,14 @@
     #container{position:fixed;inset:0}
     #container video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
     #container canvas{position:fixed;inset:0;z-index:1}
-    #hint{position:fixed;left:0;right:0;top:10px;text-align:center;color:#fff;opacity:.9;z-index:3}
+    #hint{position:fixed;left:0;right:0;top:10px;text-align:center;color:#fff;opacity:.95;z-index:3}
     #ui{position:fixed;left:12px;right:12px;bottom:12px;z-index:4;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
     button,a.button{padding:10px 14px;border:0;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;background:#4f46e5;color:#fff;text-decoration:none}
     button.secondary{background:#374151}
   </style>
 </head>
 <body>
-  <div id="hint">Point your camera at the target image</div>
+  <div id="hint">Starting…</div>
   <div id="container"></div>
 
   <div id="ui">
@@ -42,22 +42,18 @@
     import { GLTFLoader }  from 'three/addons/loaders/GLTFLoader.js';
     import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
-    // ========= CONFIG (edit these) =========
+    // ========= CONFIG =========
     const CTA_URL = 'https://example.com';
-    const MODEL_URL = './model.glb';  // your file next to index.html
-
-    // MindAR uses meters-ish units. By default, the image width ≈ 1.0 unit.
-    // So 0.8 means 80% of the image width.
-    const FIT_MODE = 'width';         // 'width' | 'height' | 'max'
-    const MODEL_SIZE_M = 0.8;         // target size in meters along FIT_MODE axis
-    const MODEL_LIFT_M = 0.02;        // raise model above image (meters)
-    const MODEL_ROT_X = 0;            // rotate if it's lying the wrong way
-    const MODEL_ROT_Y = 0;
-    const MODEL_ROT_Z = 0;
-
-    const LOCK_ANCHOR_SCALE = false;  // true = copy anchor scale; false = use 1,1,1
-    const SHOW_AXES_DEBUG = false;    // true shows axis gizmos to judge orientation
-    // ======================================
+    const MODEL_URL = './model.glb';   // put model.glb next to index.html
+    const DEBUG_PREVIEW = true;        // true = show in front of camera immediately
+    const FIT_MODE = 'max';            // 'width' | 'height' | 'max'
+    const FIT_SIZE_M = 0.6;            // meters along FIT_MODE axis
+    const MODEL_LIFT_M = 0.02;         // raise above surface
+    // Common orientation fixes (toggle as needed)
+    const ROT_FIX_X = -Math.PI/2;      // many DCCs export lying on back; try -PI/2
+    const ROT_FIX_Y = 0;
+    const ROT_FIX_Z = 0;
+    // ==========================
 
     // UI
     document.getElementById('ctaBtn').href = CTA_URL;
@@ -77,25 +73,27 @@
     renderer.setClearColor(0x000000, 0);
     renderer.domElement.style.touchAction = 'none';
 
-    // Lighting (needed for PBR)
-    scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+    // Lights
+    scene.add(new THREE.AmbientLight(0xffffff, 0.95));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9);
     dir.position.set(1, 2, 1);
     scene.add(dir);
 
-    // Anchor (we only read its pose once)
+    // Debug helpers (so we know where things are)
+    const sceneAxes = new THREE.AxesHelper(0.3);
+    sceneAxes.position.set(0,0,-0.5);
+    scene.add(sceneAxes);
+
+    // Anchor (used only to read pose once)
     const anchor = mindar.addAnchor(0);
 
-    // World-space pivot where the model will live permanently
+    // World-space pivot where the model lives permanently after placement
     const worldRoot = new THREE.Group();
     scene.add(worldRoot);
+    const worldAxes = new THREE.AxesHelper(0.2);
+    worldRoot.add(worldAxes);
 
-    if (SHOW_AXES_DEBUG) {
-      scene.add(new THREE.AxesHelper(0.2));     // scene axes
-      worldRoot.add(new THREE.AxesHelper(0.2)); // model parent axes
-    }
-
-    // GLB loader (with Draco support; harmless if not compressed)
+    // Loaders
     const gltfLoader = new GLTFLoader();
     const draco = new DRACOLoader();
     draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
@@ -104,39 +102,38 @@
 
     let modelPrefab = null;
     let spawned = false;
+    let previewInstance = null;
 
-    function loadModel(){
-      return new Promise((resolve, reject) => {
-        gltfLoader.load(
-          MODEL_URL,
-          (gltf) => { modelPrefab = gltf.scene; resolve(); },
-          undefined,
-          (err) => { console.error('Model load error', err); hint.textContent='Failed to load model'; reject(err); }
-        );
-      });
-    }
-
-    // --- Helpers: center & fit model by bounds ---
+    // Utilities
     function centerByBounds(object){
-      // Move the model so its bounding-box center sits at the group's origin
       const box = new THREE.Box3().setFromObject(object);
       const center = box.getCenter(new THREE.Vector3());
-      object.position.sub(center); // recenters pivot
+      object.position.sub(center);
       object.updateMatrixWorld(true);
     }
-
-    function fitByBounds(object, fitMode = 'width', desired = 1.0){
+    function fitByBounds(object, mode='max', desired=1.0){
       const box = new THREE.Box3().setFromObject(object);
-      const size = box.getSize(new THREE.Vector3());
-      let current = size.x;
-      if (fitMode === 'height') current = size.y;
-      if (fitMode === 'max')    current = Math.max(size.x, size.y, size.z);
-      const scale = (current > 0.00001) ? (desired / current) : 1;
+      const s = box.getSize(new THREE.Vector3());
+      let current = s.x;
+      if (mode === 'height') current = s.y;
+      if (mode === 'max')    current = Math.max(s.x, s.y, s.z);
+      const scale = (current > 1e-6) ? (desired / current) : 1;
       object.scale.multiplyScalar(scale);
       object.updateMatrixWorld(true);
     }
-
-    // Copy position/rotation (and optionally scale) from the anchor to worldRoot
+    function makeRenderable(object){
+      object.traverse((o)=>{
+        o.frustumCulled = false;
+        if (o.isMesh && o.material){
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach(m=>{
+            m.side = THREE.DoubleSide;
+            if ('toneMapped' in m) m.toneMapped = true;
+          });
+          o.castShadow = false; o.receiveShadow = false;
+        }
+      });
+    }
     const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3();
     function lockWorldTransformFromAnchor(anchorGroup, targetGroup){
       anchorGroup.updateWorldMatrix(true, true);
@@ -145,76 +142,109 @@
       anchorGroup.getWorldScale(_s);
       targetGroup.position.copy(_p);
       targetGroup.quaternion.copy(_q);
-      targetGroup.scale.copy(LOCK_ANCHOR_SCALE ? _s : new THREE.Vector3(1,1,1));
+      targetGroup.scale.set(1,1,1); // ignore anchor scale for stability
       targetGroup.updateMatrixWorld(true);
     }
 
-    // First detection → place once and keep
-    anchor.onTargetFound = async () => {
+    function loadModel(){
+      return new Promise((resolve, reject)=>{
+        gltfLoader.load(
+          MODEL_URL,
+          (gltf)=>{
+            modelPrefab = gltf.scene;
+            makeRenderable(modelPrefab);
+            console.log('GLB ok');
+            resolve();
+          },
+          (xhr)=>{
+            const pct = xhr.total ? Math.round((xhr.loaded/xhr.total)*100) : null;
+            if (pct!==null) hint.textContent = `Loading model… ${pct}%`;
+          },
+          (err)=>{ console.error('Load error', err); hint.textContent='Failed to load model'; reject(err); }
+        );
+      });
+    }
+
+    // 1) PREVIEW: show in front of camera to guarantee visibility
+    async function showPreview(){
+      if (!modelPrefab) await loadModel();
+      if (previewInstance) camera.remove(previewInstance);
+      previewInstance = modelPrefab.clone(true);
+      centerByBounds(previewInstance);
+      fitByBounds(previewInstance, FIT_MODE, FIT_SIZE_M);
+      previewInstance.rotation.set(ROT_FIX_X, ROT_FIX_Y, ROT_FIX_Z);
+      previewInstance.position.set(0, -0.05, -0.8); // slightly below center, 0.8m out
+      camera.add(previewInstance);
+      hint.textContent = 'Preview visible — press Start AR and scan the image';
+    }
+
+    // 2) AR PLACE-ONCE: on first detection, lock pose and add clone to world
+    anchor.onTargetFound = async ()=>{
       hint.textContent = 'Tracking ✓';
       if (spawned) return;
+      if (!modelPrefab) await loadModel();
 
-      if (!modelPrefab) { try { await loadModel(); } catch { return; } }
-
-      // freeze the pose where the target is now
+      // lock where the target is now
       lockWorldTransformFromAnchor(anchor.group, worldRoot);
 
-      // clone, then center → fit → rotate → lift → add
+      // fresh instance, centered & fitted
       const instance = modelPrefab.clone(true);
-
-      // 1) center pivot to the model's bounds center
       centerByBounds(instance);
-
-      // 2) scale to fit target size (e.g., % of image width)
-      fitByBounds(instance, FIT_MODE, MODEL_SIZE_M);
-
-      // 3) apply any rotation fixes (if it lies flat/backwards)
-      instance.rotation.set(MODEL_ROT_X, MODEL_ROT_Y, MODEL_ROT_Z);
-
-      // 4) offset above the image so it doesn't intersect
+      fitByBounds(instance, FIT_MODE, FIT_SIZE_M);
+      instance.rotation.set(ROT_FIX_X, ROT_FIX_Y, ROT_FIX_Z);
       instance.position.y += MODEL_LIFT_M;
 
-      if (SHOW_AXES_DEBUG) instance.add(new THREE.AxesHelper(0.2));
-      worldRoot.add(instance);
+      // debug helpers on the instance
+      const box = new THREE.Box3().setFromObject(instance);
+      const boxHelper = new THREE.Box3Helper(box, 0x00ff00);
+      instance.add(boxHelper);
 
+      worldRoot.add(instance);
       spawned = true;
       hint.textContent = 'Placed ✓ You can move away.';
+      // remove preview if it was shown
+      if (previewInstance) { camera.remove(previewInstance); previewInstance = null; }
     };
 
-    anchor.onTargetLost = () => {
+    anchor.onTargetLost = ()=>{
       hint.textContent = spawned ? 'Model placed — move around freely' : 'Move back to the target…';
     };
 
     // Buttons
-    restartBtn.addEventListener('click', async () => {
+    restartBtn.addEventListener('click', async ()=>{
       try { await mindar.stop(); } catch {}
       renderer.setAnimationLoop(null);
 
-      // reset placement so you can re-place on next detection
       worldRoot.clear();
       spawned = false;
+      if (previewInstance){ camera.remove(previewInstance); previewInstance = null; }
 
       await mindar.start();
-      renderer.setAnimationLoop(() => renderer.render(scene, camera));
+      renderer.setAnimationLoop(()=>renderer.render(scene, camera));
       hint.textContent = 'Point your camera at the target image';
+      if (DEBUG_PREVIEW) showPreview();
     });
 
-    startBtn.addEventListener('click', async () => {
+    startBtn.addEventListener('click', async ()=>{
       startBtn.disabled = true; startBtn.textContent = 'Starting…';
-      try {
+      try{
         await mindar.start();
-        renderer.setAnimationLoop(() => renderer.render(scene, camera));
+        renderer.setAnimationLoop(()=>renderer.render(scene, camera));
         startBtn.textContent = 'Running…';
-      } catch (e) {
+        hint.textContent = 'Scan the image target…';
+        if (DEBUG_PREVIEW) showPreview();
+      }catch(e){
         console.error(e);
         startBtn.disabled = false; startBtn.textContent = 'Start AR (Retry)';
+        hint.textContent = 'Start failed — check camera permissions';
       }
     });
 
-    // Keep renderer sized to container
-    new ResizeObserver(() => {
-      renderer.setSize(container.clientWidth, container.clientHeight, false);
-    }).observe(container);
+    // Resize
+    new ResizeObserver(()=>renderer.setSize(container.clientWidth, container.clientHeight, false)).observe(container);
+
+    // initial hint
+    hint.textContent = 'Press Start AR';
   </script>
 </body>
 </html>
