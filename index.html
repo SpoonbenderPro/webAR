@@ -3,9 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>WebAR — Image Scan → Spawn GLB (Stays)</title>
+  <title>WebAR — Image Scan → Spawn GLB (Auto-fit)</title>
 
-  <!-- ESM imports -->
   <script type="importmap">
   {
     "imports": {
@@ -19,7 +18,7 @@
   <style>
     html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
     #container{position:fixed;inset:0}
-    #container video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0} /* camera feed */
+    #container video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
     #container canvas{position:fixed;inset:0;z-index:1}
     #hint{position:fixed;left:0;right:0;top:10px;text-align:center;color:#fff;opacity:.9;z-index:3}
     #ui{position:fixed;left:12px;right:12px;bottom:12px;z-index:4;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
@@ -43,20 +42,31 @@
     import { GLTFLoader }  from 'three/addons/loaders/GLTFLoader.js';
     import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
-    // ----------- CONFIG (edit these) -----------
-    const CTA_URL   = 'https://example.com';
-    const MODEL_URL = './model.glb'; // put model.glb next to index.html
-    const MODEL_SCALE = 0.3;         // adjust to fit your target size
-    // -------------------------------------------
+    // ========= CONFIG (edit these) =========
+    const CTA_URL = 'https://example.com';
+    const MODEL_URL = './model.glb';  // your file next to index.html
 
-    // UI refs
+    // MindAR uses meters-ish units. By default, the image width ≈ 1.0 unit.
+    // So 0.8 means 80% of the image width.
+    const FIT_MODE = 'width';         // 'width' | 'height' | 'max'
+    const MODEL_SIZE_M = 0.8;         // target size in meters along FIT_MODE axis
+    const MODEL_LIFT_M = 0.02;        // raise model above image (meters)
+    const MODEL_ROT_X = 0;            // rotate if it's lying the wrong way
+    const MODEL_ROT_Y = 0;
+    const MODEL_ROT_Z = 0;
+
+    const LOCK_ANCHOR_SCALE = false;  // true = copy anchor scale; false = use 1,1,1
+    const SHOW_AXES_DEBUG = false;    // true shows axis gizmos to judge orientation
+    // ======================================
+
+    // UI
+    document.getElementById('ctaBtn').href = CTA_URL;
     const container  = document.getElementById('container');
     const startBtn   = document.getElementById('startBtn');
     const restartBtn = document.getElementById('restartBtn');
     const hint       = document.getElementById('hint');
-    document.getElementById('ctaBtn').href = CTA_URL;
 
-    // MindAR init
+    // MindAR
     const mindar = new MindARThree({
       container,
       imageTargetSrc: './targets.mind',
@@ -67,57 +77,67 @@
     renderer.setClearColor(0x000000, 0);
     renderer.domElement.style.touchAction = 'none';
 
-    // Lighting (important for GLB/PBR)
+    // Lighting (needed for PBR)
     scene.add(new THREE.AmbientLight(0xffffff, 0.9));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9);
     dir.position.set(1, 2, 1);
     scene.add(dir);
 
-    // Anchor for target index 0 (used only to read pose at first detection)
+    // Anchor (we only read its pose once)
     const anchor = mindar.addAnchor(0);
 
-    // A world-space pivot where we’ll place the model once and keep it there
+    // World-space pivot where the model will live permanently
     const worldRoot = new THREE.Group();
     scene.add(worldRoot);
 
-    // GLB loader (with Draco support; harmless if your model isn’t compressed)
+    if (SHOW_AXES_DEBUG) {
+      scene.add(new THREE.AxesHelper(0.2));     // scene axes
+      worldRoot.add(new THREE.AxesHelper(0.2)); // model parent axes
+    }
+
+    // GLB loader (with Draco support; harmless if not compressed)
     const gltfLoader = new GLTFLoader();
     const draco = new DRACOLoader();
     draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
-    draco.setDecoderConfig({ type: 'js' }); // safer on iOS
+    draco.setDecoderConfig({ type: 'js' });
     gltfLoader.setDRACOLoader(draco);
 
-    let modelPrefab = null;   // loaded GLB scene (template)
-    let spawned = false;      // prevents duplicate instances
+    let modelPrefab = null;
+    let spawned = false;
 
-    // Preload the model (optional: you can also lazy-load on first detection)
     function loadModel(){
       return new Promise((resolve, reject) => {
         gltfLoader.load(
           MODEL_URL,
-          (gltf) => {
-            modelPrefab = gltf.scene;
-            modelPrefab.scale.set(MODEL_SCALE, MODEL_SCALE, MODEL_SCALE);
-            console.log('Model loaded ✓');
-            resolve();
-          },
-          (xhr) => {
-            const pct = xhr.total ? Math.round((xhr.loaded/xhr.total)*100) : null;
-            console.log(pct!==null ? `Loading model… ${pct}%` : `Loading model… ${xhr.loaded} bytes`);
-          },
-          (err) => {
-            console.error('Model load error:', err);
-            hint.textContent = 'Failed to load model (check path / server / compression).';
-            reject(err);
-          }
+          (gltf) => { modelPrefab = gltf.scene; resolve(); },
+          undefined,
+          (err) => { console.error('Model load error', err); hint.textContent='Failed to load model'; reject(err); }
         );
       });
     }
 
-    // Copy anchor pose to a world-space group so the object stays after tracking is lost
-    const _p = new THREE.Vector3();
-    const _q = new THREE.Quaternion();
-    const _s = new THREE.Vector3();
+    // --- Helpers: center & fit model by bounds ---
+    function centerByBounds(object){
+      // Move the model so its bounding-box center sits at the group's origin
+      const box = new THREE.Box3().setFromObject(object);
+      const center = box.getCenter(new THREE.Vector3());
+      object.position.sub(center); // recenters pivot
+      object.updateMatrixWorld(true);
+    }
+
+    function fitByBounds(object, fitMode = 'width', desired = 1.0){
+      const box = new THREE.Box3().setFromObject(object);
+      const size = box.getSize(new THREE.Vector3());
+      let current = size.x;
+      if (fitMode === 'height') current = size.y;
+      if (fitMode === 'max')    current = Math.max(size.x, size.y, size.z);
+      const scale = (current > 0.00001) ? (desired / current) : 1;
+      object.scale.multiplyScalar(scale);
+      object.updateMatrixWorld(true);
+    }
+
+    // Copy position/rotation (and optionally scale) from the anchor to worldRoot
+    const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3();
     function lockWorldTransformFromAnchor(anchorGroup, targetGroup){
       anchorGroup.updateWorldMatrix(true, true);
       anchorGroup.getWorldPosition(_p);
@@ -125,7 +145,7 @@
       anchorGroup.getWorldScale(_s);
       targetGroup.position.copy(_p);
       targetGroup.quaternion.copy(_q);
-      targetGroup.scale.copy(_s);
+      targetGroup.scale.copy(LOCK_ANCHOR_SCALE ? _s : new THREE.Vector3(1,1,1));
       targetGroup.updateMatrixWorld(true);
     }
 
@@ -134,24 +154,35 @@
       hint.textContent = 'Tracking ✓';
       if (spawned) return;
 
-      // Ensure the model is ready
-      if (!modelPrefab){
-        try { await loadModel(); }
-        catch { return; }
-      }
+      if (!modelPrefab) { try { await loadModel(); } catch { return; } }
 
-      // Lock world pose where the target is now, then add a clone of the model there
+      // freeze the pose where the target is now
       lockWorldTransformFromAnchor(anchor.group, worldRoot);
+
+      // clone, then center → fit → rotate → lift → add
       const instance = modelPrefab.clone(true);
+
+      // 1) center pivot to the model's bounds center
+      centerByBounds(instance);
+
+      // 2) scale to fit target size (e.g., % of image width)
+      fitByBounds(instance, FIT_MODE, MODEL_SIZE_M);
+
+      // 3) apply any rotation fixes (if it lies flat/backwards)
+      instance.rotation.set(MODEL_ROT_X, MODEL_ROT_Y, MODEL_ROT_Z);
+
+      // 4) offset above the image so it doesn't intersect
+      instance.position.y += MODEL_LIFT_M;
+
+      if (SHOW_AXES_DEBUG) instance.add(new THREE.AxesHelper(0.2));
       worldRoot.add(instance);
+
       spawned = true;
       hint.textContent = 'Placed ✓ You can move away.';
     };
 
-    // When target lost → do nothing; the model remains
     anchor.onTargetLost = () => {
-      if (spawned) hint.textContent = 'Model placed — move around freely';
-      else hint.textContent = 'Move back to the target…';
+      hint.textContent = spawned ? 'Model placed — move around freely' : 'Move back to the target…';
     };
 
     // Buttons
@@ -159,10 +190,8 @@
       try { await mindar.stop(); } catch {}
       renderer.setAnimationLoop(null);
 
-      // If you want a fresh placement on restart, reset these:
-      scene.remove(worldRoot);
+      // reset placement so you can re-place on next detection
       worldRoot.clear();
-      scene.add(worldRoot);
       spawned = false;
 
       await mindar.start();
@@ -183,10 +212,9 @@
     });
 
     // Keep renderer sized to container
-    const ro = new ResizeObserver(() => {
+    new ResizeObserver(() => {
       renderer.setSize(container.clientWidth, container.clientHeight, false);
-    });
-    ro.observe(container);
+    }).observe(container);
   </script>
 </body>
 </html>
